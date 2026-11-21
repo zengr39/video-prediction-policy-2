@@ -195,11 +195,11 @@ def evaluate(args):
     from .benchmark import scheduler_io as io
 
     tasks = io.load_tasks(Path(config["tasks_file"]))
-    if (
-        len(tasks) != 54
-        or len(set(tasks)) != 54
-        or sum(io.native_target(t, set(tasks)) for t in tasks) != 2100
-    ):
+    official = set(tasks)
+    episode_count = sum(io.episode_target(config, task, official) for task in tasks)
+    if len(tasks) != 54 or len(official) != 54:
+        raise ValueError("Expected the complete native 54-entry task inventory")
+    if config.get("eval_num", "native") in (None, "native") and episode_count != 2100:
         raise ValueError("Expected the complete native 54-entry/2100-episode inventory")
     if config.get("seed") != 1 or config.get("action_type") != "ee":
         raise ValueError("Reference evaluation requires seed1 and EE16")
@@ -210,7 +210,7 @@ def evaluate(args):
             dict(
                 tasks=54,
                 official_cells=42,
-                episodes=2100,
+                episodes=episode_count,
                 slots=len(config["slots"]),
                 run_id=config["run_id"],
                 inference=settings,
@@ -224,7 +224,7 @@ def evaluate(args):
     for key in ("robodojo_root", "output_root", "tasks_file", "official_tasks_file", "sim_python"):
         config[key] = str(Path(config[key]).resolve())
     for task in tasks:
-        if io.layout_count(config, task) < io.native_target(task, set(tasks)):
+        if io.layout_count(config, task) < io.episode_target(config, task, official):
             raise ValueError(f"Missing seed1 layouts for {task}")
     output = Path(config["output_root"])
     output.mkdir(parents=True, exist_ok=True)
@@ -257,6 +257,11 @@ def evaluate(args):
             "VPP2",
             "--seed",
             "1",
+            *(
+                ["--episode-cap", str(int(config["eval_num"]))]
+                if config.get("eval_num", "native") not in (None, "native")
+                else []
+            ),
             "--runner-summary",
             str(output / "summary.json"),
             "--output-json",

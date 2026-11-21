@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy", default="VPP2")
     parser.add_argument("--embodiment", default="arx_x5")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--episode-cap",
+        type=int,
+        help="Cap every task at this many episodes. Official audits omit this.",
+    )
     parser.add_argument("--action-type", default="ee")
     parser.add_argument("--runner-summary", type=Path)
     parser.add_argument("--output-json", type=Path, required=True)
@@ -121,6 +126,15 @@ def detail_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
+def expected_task_episodes(task: str, task_set: set[str], cap: int | None) -> int:
+    native = 25 if task.endswith("_random") or f"{task}_random" in task_set else 50
+    if cap is None:
+        return native
+    if cap < 1:
+        raise ValueError("--episode-cap must be a positive integer")
+    return min(native, cap)
+
+
 def rate(numerator: float, denominator: int) -> float:
     return 100.0 * numerator / denominator if denominator else 0.0
 
@@ -145,7 +159,7 @@ def main() -> int:
     task_records: dict[str, dict[str, Any]] = {}
 
     for task in tasks:
-        expected = 25 if task.endswith("_random") or f"{task}_random" in task_set else 50
+        expected = expected_task_episodes(task, task_set, args.episode_cap)
         result_path = (
             result_root
             / task
@@ -224,8 +238,14 @@ def main() -> int:
             "success_rate": rate(successes, episodes),
             "score": rate(score_sum, episodes),
         }
-        if episodes != 50:
-            issues.append(f"official cell {base}: found {episodes} episodes, expected 50")
+        expected_cell = sum(
+            expected_task_episodes(name, task_set, args.episode_cap)
+            for name in ([base] + ([f"{base}_random"] if f"{base}_random" in task_records else []))
+        )
+        if episodes != expected_cell:
+            issues.append(
+                f"official cell {base}: found {episodes} episodes, expected {expected_cell}"
+            )
 
     dimensions: dict[str, dict[str, Any]] = {}
     for dimension, names in DIMENSIONS.items():
@@ -259,7 +279,7 @@ def main() -> int:
         "runnable_tasks": len(tasks),
         "official_cells": len(cells),
         "episodes": episodes,
-        "expected_episodes": 2100,
+        "expected_episodes": sum(expected_task_episodes(task, task_set, args.episode_cap) for task in tasks),
         "successes": successes,
         "success_rate": rate(successes, episodes),
         "score": rate(score_sum, episodes),
@@ -283,7 +303,7 @@ def main() -> int:
         f"- Run: `{args.run_id}`",
         f"- Checkpoint label: `{args.ckpt_name}`",
         f"- Inventory: {len(tasks)} runnable tasks / {len(cells)} official cells",
-        f"- Episodes: {episodes} / 2100",
+        f"- Episodes: {episodes} / {report['expected_episodes']}",
         f"- Official five-dimension SR: {report['official_mean_success_rate']:.2f}%",
         f"- Pooled success rate: {report['success_rate']:.2f}%",
         f"- Official five-dimension Score: {report['official_mean_score']:.2f}",
@@ -304,7 +324,7 @@ def main() -> int:
 
     print(
         f"status={report['status']} tasks={len(tasks)} cells={len(cells)} "
-        f"episodes={episodes}/2100 success_rate={report['success_rate']:.2f}% "
+        f"episodes={episodes}/{report['expected_episodes']} success_rate={report['success_rate']:.2f}% "
         f"score={report['score']:.2f} issues={len(issues)}"
     )
     return 0 if not issues else 1

@@ -56,6 +56,17 @@ def native_target(task: str, official_tasks: set[str]) -> int:
     return 25 if task.endswith("_random") or f"{task}_random" in official_tasks else 50
 
 
+def episode_target(config: dict[str, Any], task: str, official_tasks: set[str]) -> int:
+    native = native_target(task, official_tasks)
+    cap = config.get("eval_num", "native")
+    if cap in (None, "native"):
+        return native
+    cap = int(cap)
+    if cap < 1:
+        raise ValueError("eval_num must be a positive integer or 'native'")
+    return min(native, cap)
+
+
 def result_parent(config: dict[str, Any], task: str) -> Path:
     return (
         Path(config["robodojo_root"])
@@ -136,7 +147,7 @@ def client_environment(config, run_id):
             ]
         ),
         "ROBODOJO_RUN_ID": run_id,
-        "EVAL_NUM": "native",
+        "EVAL_NUM": str(config.get("eval_num", "native")),
         "ROBODOJO_SAVE_EVAL_VIDEOS": "true" if config.get("save_eval_videos") else "false",
         "ROBODOJO_SAVE_EVAL_VIDEOS_MAX_LAYOUTS": str(config.get("save_eval_videos_max_layouts", 5)),
         "ROBODOJO_MAX_BASH_RETRIES": "10",

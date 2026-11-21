@@ -117,7 +117,7 @@ def build_plan(config: dict[str, Any]) -> dict[str, Any]:
     chunk = int(config.get("chunk_layouts", 12))
     plan: dict[str, Any] = {"config_snapshot": config, "tasks": {}, "jobs": []}
     for task in tasks:
-        target = tail.native_target(task, official)
+        target = tail.episode_target(config, task, official)
         count = tail.layout_count(config, task)
         if count < target:
             raise RuntimeError(f"{task}: {count} layouts < target {target}")
@@ -290,7 +290,7 @@ def run(config: dict[str, Any], poll: int) -> int:
     failed = [t for t, info in plan["tasks"].items() if info["state"] != "done"]
     summary = {
         "run_id": config["run_id"],
-        "eval_num": "native",
+        "eval_num": config.get("eval_num", "native"),
         "dimensions": ["all"],
         "counts": {
             "PASS": len(plan["tasks"]) - len(failed),
