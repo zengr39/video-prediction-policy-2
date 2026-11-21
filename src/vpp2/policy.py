@@ -9,6 +9,7 @@ import torchvision.transforms.functional as transforms_F
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
+from .call_dump import dump_root, save_call
 from .data import DEFAULT_PROMPT
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
@@ -231,6 +232,8 @@ class RoboDojoVPP2Policy:
         self.history_buffer_size = 177
         self.visual_planning_output_root = None
         self.visual_planning_full_steps = 10
+        self.call_dump_root = dump_root()
+        self._dump_episode_by_env: dict[int, int] = {}
         self._history_by_env = {}
         self._history_anchor_by_env = {}
         self._history_step_by_env = {}
@@ -364,6 +367,7 @@ class RoboDojoVPP2Policy:
             "rgb_frames": len(condition_frames),
             "latent_frames": (len(condition_frames) - 1) // 4 + 1,
             "stride_native_steps": self.history_stride,
+            "input_frames_chw": condition_frames,
         }
         return (condition.contiguous(), metadata)
 
@@ -394,8 +398,10 @@ class RoboDojoVPP2Policy:
             )
         delta_eef_reference = state
         proprio = self._normalize_state(delta_eef_reference)
+        call_index = int(self._inference_index_by_env.get(env_idx, 0))
         (action_seed, video_seed) = self._seeds(env_idx)
         capture_visual_plan = self.visual_planning_output_root is not None
+        capture_call = self.call_dump_root is not None
         infer_kwargs = {
             "prompt": DEFAULT_PROMPT.format(task=instruction),
             "input_image": image,
@@ -410,7 +416,7 @@ class RoboDojoVPP2Policy:
             "rand_device": self.rand_device,
             "tiled": self.tiled,
             "num_video_frames": self.num_video_frames,
-            "return_one_step_video": capture_visual_plan,
+            "return_one_step_video": capture_visual_plan or capture_call,
             "return_full_video": capture_visual_plan,
             "full_video_num_inference_steps": self.visual_planning_full_steps
             if capture_visual_plan
@@ -425,9 +431,62 @@ class RoboDojoVPP2Policy:
             raise ValueError(
                 f"Model returned an invalid RoboDojo action chunk: expected [T,{self.output_action_dim}], got {action.shape}."
             )
+        if capture_call:
+            self._save_call_dump(
+                env_idx=env_idx,
+                call_index=call_index,
+                history_metadata=history_metadata,
+                image=image,
+                predicted_frames=prediction.get("video_one_step"),
+                action=action,
+            )
         return action
 
+    def _save_call_dump(
+        self,
+        *,
+        env_idx: int,
+        call_index: int,
+        history_metadata: Optional[dict[str, Any]],
+        image: torch.Tensor,
+        predicted_frames: Any,
+        action: np.ndarray,
+    ) -> None:
+        root = self.call_dump_root
+        if root is None or not predicted_frames:
+            return
+        metadata = dict(history_metadata or {})
+        input_frames = metadata.get("input_frames_chw")
+        if not input_frames:
+            input_frames = [_normalized_to_uint8(image)]
+        try:
+            context = self._request_context or {}
+            save_call(
+                root=root,
+                evaluation_id=context.get("evaluation_id"),
+                trial_id=context.get("trial_id"),
+                env_idx=env_idx,
+                episode_index=int(self._dump_episode_by_env.get(env_idx, 0)),
+                call_index=call_index,
+                current_step=int(metadata.get("current_step", self._history_step_by_env.get(env_idx, 0))),
+                input_steps=[int(step) for step in metadata.get("selected_steps", [0])],
+                input_frames_chw=input_frames,
+                predicted_frames=list(predicted_frames),
+                action=action,
+                ws_inference_step=context.get("step"),
+            )
+        except Exception as exc:
+            print(f"[VPP2][call-dump] failed env={env_idx} call={call_index}: {exc}", flush=True)
+
+    def _advance_dump_episode(self, env_idx: int) -> None:
+        if int(self._inference_index_by_env.get(int(env_idx), 0)) <= 0:
+            return
+        env_idx = int(env_idx)
+        self._dump_episode_by_env[env_idx] = int(self._dump_episode_by_env.get(env_idx, 0)) + 1
+
     def reset(self) -> None:
+        for env_idx in list(self._inference_index_by_env):
+            self._advance_dump_episode(env_idx)
         self._inference_index = 0
         for name in self._PER_ENV_STATE:
             state = getattr(self, name, None)
@@ -436,6 +495,7 @@ class RoboDojoVPP2Policy:
 
     def reset_env(self, env_idx: int) -> None:
         """Clear the episode state of one environment only."""
+        self._advance_dump_episode(env_idx)
         for name in self._PER_ENV_STATE:
             state = getattr(self, name, None)
             if state is not None:
