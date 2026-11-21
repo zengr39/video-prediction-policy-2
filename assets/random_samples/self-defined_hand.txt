@@ -1,0 +1,26 @@
+A person uses their right hand to push the lid of the laptop down until the laptop is fully closed. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_1.png
+A person uses their right hand to grasp the white jacket on the left side of the desk, pull it to the right, and drop it on top of the laptop keyboard. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_1.png
+A person uses their right hand to grasp the top handle of the white backpack and lift the backpack up off the desk. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_1.png
+A person uses their left hand to grasp the white jacket and fold it in half on the desk, while the right hand keeps static on the touchpad. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_1.png
+A person uses their right hand to slide two fingers upward on the touchpad, scrolling the code on the laptop screen. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_1.png
+close the laptop@@self-defined_hand/hand_1.png
+用右手把白色衣服叠好，放进左边的白色背包里@@self-defined_hand/hand_1.png
+The left robot gripper keeps static, while the right robot gripper pushes the lid of the laptop down until it is closed. This is a composed robot video with two wrist-view in the right side.@@self-defined_hand/hand_1.png
+A person uses their right hand to push the lid of the laptop down until the laptop is fully closed. This is an ego-view video, and the camera slowly moves to the left.@@self-defined_hand/hand_1.png
+A person uses their right hand to release the white mouse, grasp the black glasses on the notebook, and place them on the sheet of handwritten paper. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their right hand to release the white mouse, grasp the water bottle on the right side of the desk, and hold it up under the camera. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their right hand to push the white mouse to the left until it touches the notebook. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their right hand to release the white mouse, pick up the sheet of handwritten paper, and flip it over on the desk. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their left hand to grasp the water bottle and their right hand to unscrew the purple bottle cap and place the cap on the desk. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their right hand to pick up the notebook with the glasses on it and place it on top of the white foam tray. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+The hand keeps static on the white mouse, and nothing on the desk moves. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+pick up the glasses@@self-defined_hand/hand_2.png
+A person points at the water bottle and the bottle floats up into the air without being touched. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_2.png
+A person uses their right hand to move the white mouse to the left and then click the left mouse button twice. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their right hand to release the white mouse, grasp the black glasses on the notebook, and place them on the laptop keyboard. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their right hand to release the white mouse and type on the right side of the laptop keyboard. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their right hand to release the white mouse and push the lid of the laptop down until the laptop is fully closed. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their right hand to grasp the white foam block behind the laptop and move it to the right side of the desk. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their left hand to type on the laptop keyboard while the right hand moves the white mouse. This is an ego-view video, and the camera remains static.@@self-defined_hand/hand_3.png
+A person uses their right hand to pick up the black glasses from the notebook and put them on. This is an ego-view video.@@self-defined_hand/hand_3.png
+The left robot gripper keeps static, while the right robot gripper grasps the white mouse and lifts it off the desk. This is a composed robot video with two wrist-view in the right side.@@self-defined_hand/hand_3.png
