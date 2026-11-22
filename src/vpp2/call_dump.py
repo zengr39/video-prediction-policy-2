@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -14,6 +16,14 @@ import torch
 
 _LOCK = threading.Lock()
 _FORMAT_WRITTEN: set[str] = set()
+# One directory per server process, so a restarted server never overwrites or
+# appends to an earlier process's episodes (env indices restart from 0).
+_SESSION = f"{time.strftime('%Y%m%d-%H%M%S')}-pid{os.getpid()}"
+_SESSION_WRITTEN: set[str] = set()
+
+
+def run_id() -> str | None:
+    return os.environ.get("VPP2_RUN_ID", "").strip() or None
 
 
 def dump_root() -> Path | None:
@@ -117,6 +127,11 @@ def _ensure_format_note(root: Path) -> None:
                         "and are not copies of the input. The last 8 are the future. Playback fps is 4."
                     ),
                     "action": "float16 end-effector chunk, shape [horizon, 16].",
+                    "layout": "<root>/<session>/envNN/episodeNNNN/. One session per server process; see <session>/session.json.",
+                    "instruction": "Task instruction the policy received for this call.",
+                    "run_id": "VPP2_RUN_ID of the server process, if set.",
+                    "evaluation_id / trial_id": "Ids from the request context, if the server passed one; otherwise null.",
+                    "time": "Local wall-clock time when the call was saved.",
                 },
                 indent=2,
             ),
@@ -125,11 +140,43 @@ def _ensure_format_note(root: Path) -> None:
     _FORMAT_WRITTEN.add(key)
 
 
+def _ensure_session_note(session_dir: Path) -> None:
+    key = str(session_dir)
+    if key in _SESSION_WRITTEN:
+        return
+    repo = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        )
+    except Exception:
+        commit, dirty = None, None
+    note = {
+        "run_id": run_id(),
+        "session": session_dir.name,
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "vpp2_commit": commit,
+        "vpp2_dirty": dirty,
+    }
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "session.json").write_text(json.dumps(note, indent=2) + "\n", encoding="utf-8")
+    _SESSION_WRITTEN.add(key)
+
+
 def save_call(
     *,
     root: Path,
     evaluation_id: Any,
     trial_id: Any,
+    instruction: Any,
     env_idx: int,
     episode_index: int,
     call_index: int,
@@ -140,18 +187,18 @@ def save_call(
     action: np.ndarray,
     ws_inference_step: Any,
 ) -> None:
-    episode_dir = (
-        root
-        / _safe(evaluation_id)
-        / _safe(trial_id)
-        / f"env{int(env_idx):02d}"
-        / f"episode{int(episode_index):04d}"
-    )
+    session_dir = root / _SESSION
+    episode_dir = session_dir / f"env{int(env_idx):02d}" / f"episode{int(episode_index):04d}"
     stem = f"call{int(call_index):04d}_step{int(current_step):06d}"
     input_name = f"{stem}_input.mp4"
     pred_name = f"{stem}_pred.mp4"
     action_array = np.asarray(action, dtype=np.float16)
     record = {
+        "run_id": run_id(),
+        "evaluation_id": None if evaluation_id is None else str(evaluation_id),
+        "trial_id": None if trial_id is None else str(trial_id),
+        "instruction": None if instruction is None else str(instruction),
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "episode_index": int(episode_index),
         "call_index": int(call_index),
         "env_idx": int(env_idx),
@@ -169,6 +216,7 @@ def save_call(
     with _LOCK:
         episode_dir.mkdir(parents=True, exist_ok=True)
         _ensure_format_note(root)
+        _ensure_session_note(session_dir)
         _write_mp4(episode_dir / input_name, [_chw_uint8_to_hwc(frame) for frame in input_frames_chw])
         _write_mp4(episode_dir / pred_name, [_as_hwc_uint8(frame) for frame in predicted_frames])
         with (episode_dir / "calls.jsonl").open("a", encoding="utf-8") as handle:

@@ -439,6 +439,7 @@ class RoboDojoVPP2Policy:
                 image=image,
                 predicted_frames=prediction.get("video_one_step"),
                 action=action,
+                instruction=instruction,
             )
         return action
 
@@ -451,6 +452,7 @@ class RoboDojoVPP2Policy:
         image: torch.Tensor,
         predicted_frames: Any,
         action: np.ndarray,
+        instruction: Optional[str] = None,
     ) -> None:
         root = self.call_dump_root
         if root is None or not predicted_frames:
@@ -465,6 +467,7 @@ class RoboDojoVPP2Policy:
                 root=root,
                 evaluation_id=context.get("evaluation_id"),
                 trial_id=context.get("trial_id"),
+                instruction=instruction,
                 env_idx=env_idx,
                 episode_index=int(self._dump_episode_by_env.get(env_idx, 0)),
                 call_index=call_index,
