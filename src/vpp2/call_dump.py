@@ -33,6 +33,20 @@ def dump_root() -> Path | None:
     return Path(raw)
 
 
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dump_cond_enabled() -> bool:
+    """Also save the exact model inputs of each call (``*_cond.npz``) for offline replay."""
+    return _flag("VPP2_CALL_DUMP_COND")
+
+
+def dump_latent_enabled() -> bool:
+    """Also save the pre-decode one-step video latents of each call (``*_latent.pt``)."""
+    return _flag("VPP2_CALL_DUMP_LATENT")
+
+
 def _safe(value: Any) -> str:
     text = str(value or "unknown").strip() or "unknown"
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)
@@ -132,6 +146,24 @@ def _ensure_format_note(root: Path) -> None:
                     "run_id": "VPP2_RUN_ID of the server process, if set.",
                     "evaluation_id / trial_id": "Ids from the request context, if the server passed one; otherwise null.",
                     "time": "Local wall-clock time when the call was saved.",
+                    "cond_file": (
+                        "Only with VPP2_CALL_DUMP_COND=1: callNNNN_stepSSSSSS_cond.npz, the exact model "
+                        "inputs for offline replay (src/replay_call.py in the main repo). Keys: "
+                        "condition_frames uint8 [9,H,W,3] RGB, anchor first, the frames the model saw "
+                        "(no mp4 compression); selected_steps int64 [9], simulator step of each frame "
+                        "(0 = anchor / episode start); current_step int64; state float32 [16], raw "
+                        "state before normalization; proprio float32 [16], the normalized state fed "
+                        "to the model; action_seed / video_seed int64 (-1 if None); prompt str, the "
+                        "full text prompt; instruction str; action float32 [32,16], denormalized "
+                        "chunk (the jsonl 'action' is the same in float16); action_normalized "
+                        "float32 [32,16], model output before denormalization."
+                    ),
+                    "latent_file": (
+                        "Only with VPP2_CALL_DUMP_LATENT=1: callNNNN_stepSSSSSS_latent.pt (torch.load). "
+                        "one_step_latents bf16 [1,16,5,h,w], the one-step prediction before VAE decode "
+                        "(latent frames 0-2 cover the 9 condition frames, 3-4 the future); "
+                        "condition_latents bf16 [1,16,3,h,w], the clean VAE encoding of the condition."
+                    ),
                 },
                 indent=2,
             ),
@@ -186,6 +218,8 @@ def save_call(
     predicted_frames: list[Any],
     action: np.ndarray,
     ws_inference_step: Any,
+    cond: dict[str, Any] | None = None,
+    latents: dict[str, Any] | None = None,
 ) -> None:
     session_dir = root / _SESSION
     episode_dir = session_dir / f"env{int(env_idx):02d}" / f"episode{int(episode_index):04d}"
@@ -213,11 +247,72 @@ def save_call(
         "action_shape": list(action_array.shape),
         "action": action_array.tolist(),
     }
+    cond_arrays = None
+    if cond is not None:
+        cond_name = f"{stem}_cond.npz"
+        record["cond_file"] = cond_name
+        record["action_seed"] = cond.get("action_seed")
+        record["video_seed"] = cond.get("video_seed")
+        cond_arrays = _cond_arrays(
+            cond=cond,
+            instruction=instruction,
+            current_step=current_step,
+            input_frames_chw=input_frames_chw,
+            action=action,
+        )
+    latent_payload = None
+    if latents is not None and latents.get("one_step_latents") is not None:
+        latent_name = f"{stem}_latent.pt"
+        record["latent_file"] = latent_name
+        latent_payload = {
+            key: value.detach().to("cpu", torch.bfloat16).contiguous()
+            for key, value in latents.items()
+            if value is not None
+        }
     with _LOCK:
         episode_dir.mkdir(parents=True, exist_ok=True)
         _ensure_format_note(root)
         _ensure_session_note(session_dir)
         _write_mp4(episode_dir / input_name, [_chw_uint8_to_hwc(frame) for frame in input_frames_chw])
         _write_mp4(episode_dir / pred_name, [_as_hwc_uint8(frame) for frame in predicted_frames])
+        if cond_arrays is not None:
+            np.savez_compressed(episode_dir / record["cond_file"], **cond_arrays)
+        if latent_payload is not None:
+            torch.save(latent_payload, episode_dir / record["latent_file"])
         with (episode_dir / "calls.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _as_float32(value: Any) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        value = value.detach().float().cpu().numpy()
+    return np.asarray(value, dtype=np.float32)
+
+
+def _cond_arrays(
+    *,
+    cond: dict[str, Any],
+    instruction: Any,
+    current_step: int,
+    input_frames_chw: list[torch.Tensor],
+    action: np.ndarray,
+) -> dict[str, np.ndarray]:
+    def seed(value: Any) -> np.ndarray:
+        return np.asarray(-1 if value is None else int(value), dtype=np.int64)
+
+    arrays = {
+        "condition_frames": np.stack([_chw_uint8_to_hwc(frame) for frame in input_frames_chw]),
+        "selected_steps": np.asarray([int(step) for step in cond.get("selected_steps", [])], dtype=np.int64),
+        "current_step": np.asarray(int(current_step), dtype=np.int64),
+        "state": _as_float32(cond["state"]).reshape(-1),
+        "action_seed": seed(cond.get("action_seed")),
+        "video_seed": seed(cond.get("video_seed")),
+        "prompt": np.asarray(str(cond.get("prompt") or "")),
+        "instruction": np.asarray("" if instruction is None else str(instruction)),
+        "action": _as_float32(action),
+    }
+    if cond.get("proprio") is not None:
+        arrays["proprio"] = _as_float32(cond["proprio"]).reshape(-1)
+    if cond.get("action_normalized") is not None:
+        arrays["action_normalized"] = _as_float32(cond["action_normalized"]).reshape(arrays["action"].shape)
+    return arrays

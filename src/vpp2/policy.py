@@ -9,7 +9,7 @@ import torchvision.transforms.functional as transforms_F
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
-from .call_dump import dump_root, save_call
+from .call_dump import dump_cond_enabled, dump_latent_enabled, dump_root, save_call
 from .data import DEFAULT_PROMPT
 from .checkpoint_compat import action_config
 from .datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
@@ -233,6 +233,8 @@ class RoboDojoVPP2Policy:
         self.visual_planning_output_root = None
         self.visual_planning_full_steps = 10
         self.call_dump_root = dump_root()
+        self.call_dump_cond = self.call_dump_root is not None and dump_cond_enabled()
+        self.call_dump_latent = self.call_dump_root is not None and dump_latent_enabled()
         self._dump_episode_by_env: dict[int, int] = {}
         self._history_by_env = {}
         self._history_anchor_by_env = {}
@@ -382,6 +384,67 @@ class RoboDojoVPP2Policy:
         video_seed = int(action_seed + self.video_seed_offset)
         return (action_seed, video_seed)
 
+    def prompt_for(self, instruction: str) -> str:
+        return DEFAULT_PROMPT.format(task=instruction)
+
+    def condition_from_uint8(self, frames: list[torch.Tensor]) -> torch.Tensor:
+        """Normalized ``[1,3,T,H,W]`` condition from uint8 CHW frames, as the server builds it."""
+        return (
+            _uint8_to_normalized(frames)
+            .unsqueeze(0)
+            .to(device=self.model.device, dtype=self.model.torch_dtype)
+            .contiguous()
+        )
+
+    def run_model(
+        self,
+        *,
+        image: torch.Tensor,
+        condition: Optional[torch.Tensor],
+        state: np.ndarray,
+        prompt: str,
+        action_seed: Optional[int],
+        video_seed: Optional[int],
+        return_one_step_video: bool = False,
+        return_one_step_latents: bool = False,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """One model call; returns the denormalized action chunk and the raw prediction."""
+        proprio = self._normalize_state(state)
+        capture_visual_plan = self.visual_planning_output_root is not None
+        infer_kwargs = {
+            "prompt": prompt,
+            "input_image": image,
+            "action_horizon": self.action_horizon,
+            "proprio": proprio,
+            "negative_prompt": self.negative_prompt,
+            "text_cfg_scale": self.text_cfg_scale,
+            "num_inference_steps": self.num_inference_steps,
+            "sigma_shift": self.sigma_shift,
+            "seed": action_seed,
+            "video_seed": video_seed,
+            "rand_device": self.rand_device,
+            "tiled": self.tiled,
+            "num_video_frames": self.num_video_frames,
+            "return_one_step_video": capture_visual_plan or return_one_step_video,
+            "return_full_video": capture_visual_plan,
+            "full_video_num_inference_steps": self.visual_planning_full_steps
+            if capture_visual_plan
+            else None,
+        }
+        if return_one_step_latents:
+            infer_kwargs["return_one_step_latents"] = True
+        if condition is not None:
+            infer_kwargs["condition_video"] = condition
+        with torch.no_grad():
+            prediction = self.model.infer_action(**infer_kwargs)
+        action = self._denormalize_action(prediction["action"])[0]
+        if action.ndim != 2 or action.shape[1] != self.output_action_dim:
+            raise ValueError(
+                f"Model returned an invalid RoboDojo action chunk: expected [T,{self.output_action_dim}], got {action.shape}."
+            )
+        prediction["proprio"] = proprio.detach().float().cpu()
+        return action, prediction
+
     def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
         state = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         env_idx = int(observation.get("env_idx", 0))
@@ -396,42 +459,39 @@ class RoboDojoVPP2Policy:
             (history_condition, history_metadata) = self._build_history_condition(
                 image=image, env_idx=env_idx
             )
-        delta_eef_reference = state
-        proprio = self._normalize_state(delta_eef_reference)
         call_index = int(self._inference_index_by_env.get(env_idx, 0))
         (action_seed, video_seed) = self._seeds(env_idx)
-        capture_visual_plan = self.visual_planning_output_root is not None
         capture_call = self.call_dump_root is not None
-        infer_kwargs = {
-            "prompt": DEFAULT_PROMPT.format(task=instruction),
-            "input_image": image,
-            "action_horizon": self.action_horizon,
-            "proprio": proprio,
-            "negative_prompt": self.negative_prompt,
-            "text_cfg_scale": self.text_cfg_scale,
-            "num_inference_steps": self.num_inference_steps,
-            "sigma_shift": self.sigma_shift,
-            "seed": action_seed,
-            "video_seed": video_seed,
-            "rand_device": self.rand_device,
-            "tiled": self.tiled,
-            "num_video_frames": self.num_video_frames,
-            "return_one_step_video": capture_visual_plan or capture_call,
-            "return_full_video": capture_visual_plan,
-            "full_video_num_inference_steps": self.visual_planning_full_steps
-            if capture_visual_plan
-            else None,
-        }
-        if history_condition is not None:
-            infer_kwargs["condition_video"] = history_condition
-        with torch.no_grad():
-            prediction = self.model.infer_action(**infer_kwargs)
-        action = self._denormalize_action(prediction["action"])[0]
-        if action.ndim != 2 or action.shape[1] != self.output_action_dim:
-            raise ValueError(
-                f"Model returned an invalid RoboDojo action chunk: expected [T,{self.output_action_dim}], got {action.shape}."
-            )
+        prompt = self.prompt_for(instruction)
+        action, prediction = self.run_model(
+            image=image,
+            condition=history_condition,
+            state=state,
+            prompt=prompt,
+            action_seed=action_seed,
+            video_seed=video_seed,
+            return_one_step_video=capture_call,
+            return_one_step_latents=capture_call and self.call_dump_latent,
+        )
         if capture_call:
+            extra = None
+            if self.call_dump_cond:
+                metadata = history_metadata or {}
+                extra = {
+                    "state": state,
+                    "proprio": prediction["proprio"],
+                    "action_seed": action_seed,
+                    "video_seed": video_seed,
+                    "prompt": prompt,
+                    "selected_steps": metadata.get("selected_steps", [0]),
+                    "action_normalized": prediction["action"],
+                }
+            latents = None
+            if self.call_dump_latent:
+                latents = {
+                    "one_step_latents": prediction.get("video_one_step_latents"),
+                    "condition_latents": prediction.get("condition_latents"),
+                }
             self._save_call_dump(
                 env_idx=env_idx,
                 call_index=call_index,
@@ -440,6 +500,8 @@ class RoboDojoVPP2Policy:
                 predicted_frames=prediction.get("video_one_step"),
                 action=action,
                 instruction=instruction,
+                cond=extra,
+                latents=latents,
             )
         return action
 
@@ -453,6 +515,8 @@ class RoboDojoVPP2Policy:
         predicted_frames: Any,
         action: np.ndarray,
         instruction: Optional[str] = None,
+        cond: Optional[dict[str, Any]] = None,
+        latents: Optional[dict[str, Any]] = None,
     ) -> None:
         root = self.call_dump_root
         if root is None or not predicted_frames:
@@ -477,6 +541,8 @@ class RoboDojoVPP2Policy:
                 predicted_frames=list(predicted_frames),
                 action=action,
                 ws_inference_step=context.get("step"),
+                cond=cond,
+                latents=latents,
             )
         except Exception as exc:
             print(f"[VPP2][call-dump] failed env={env_idx} call={call_index}: {exc}", flush=True)

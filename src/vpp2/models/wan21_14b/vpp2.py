@@ -1467,8 +1467,11 @@ class VPP2(torch.nn.Module):
         return_full_video: bool = False,
         full_video_num_inference_steps: Optional[int] = None,
         condition_observation_video: Optional[torch.Tensor] = None,
+        return_one_step_latents: bool = False,
     ) -> dict[str, Any]:
         self.eval()
+        if return_one_step_latents and not return_one_step_video:
+            raise ValueError("`return_one_step_latents` requires `return_one_step_video`.")
         allowed_action_modes = {"bidirectional", "first_frame_causal", "three_frame"}
         if (
             str(getattr(self.video_expert, "video_attention_mask_mode", ""))
@@ -1783,6 +1786,10 @@ class VPP2(torch.nn.Module):
                     trajectory_latents = self.infer_video_scheduler.step(
                         next_video_prediction, step_delta_video, trajectory_latents
                     )
+            if return_one_step_latents:
+                # Pre-decode latents of the one-step prediction and the clean condition.
+                result["video_one_step_latents"] = one_step_video_latents.detach().cpu()
+                result["condition_latents"] = condition_latents.detach().cpu()
             result["video_one_step"] = self._decode_latents(one_step_video_latents, tiled=tiled)
             result["video"] = result["video_one_step"]
             result["video_inference_steps"] = 1
