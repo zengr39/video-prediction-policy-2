@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import traceback
 from collections import OrderedDict, defaultdict
@@ -94,6 +95,7 @@ class VideoEventDataset(torch.utils.data.Dataset):
         per_camera_video_size: Optional[list[int]] = None,
         parquet_path_column: str = "parquet_path",
         text_embedding_path_column: Optional[str] = None,
+        segment_text_column: Optional[str] = None,
         instruction_column: str = "gemini_caption",
         fallback_instruction_column: str = "high_level_instruction",
         action_column: str = "action",
@@ -602,6 +604,15 @@ class VideoEventDataset(torch.utils.data.Dataset):
         if missing:
             raise ValueError(f"Metadata missing required columns: {missing}")
 
+        # Optional per-frame subtask captions (off by default). When set, the column holds a
+        # JSON file path (relative to the metadata file) listing
+        # {"segments": [{"start", "end", "prompt", "text_embedding_path"}, ...]} in native
+        # episode frame indices; the sample's current frame picks the segment, and frames
+        # outside every segment fall back to the row's own prompt and embedding.
+        self.segment_text_column = segment_text_column
+        self._segment_text_cache: dict[str, list[dict[str, Any]]] = {}
+        if self.segment_text_column is not None and self.segment_text_column not in df.columns:
+            raise ValueError(f"segment_text_column `{self.segment_text_column}` not in metadata")
         self.text_embedding_path_column = text_embedding_path_column
         if self.text_embedding_path_column is None:
             for candidate in ("t5_emb", "t5_emb_path", "text_embedding_path"):
@@ -1403,8 +1414,31 @@ class VideoEventDataset(torch.utils.data.Dataset):
                 task = "robot manipulation"
         return task
 
-    def _load_text_context(self, row: pd.Series) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.text_embedding_path_column is not None:
+    def _segment_text_for(self, row: pd.Series, frame: int) -> Optional[dict[str, Any]]:
+        """Segment caption covering native frame `frame`, or None (feature off / no cover)."""
+        if self.segment_text_column is None:
+            return None
+        value = row.get(self.segment_text_column)
+        if not self._has_metadata_value(value):
+            return None
+        base = self.metadata_paths[int(row["_vpp2_source_idx"])].parent
+        key = str(base / str(value))
+        segments = self._segment_text_cache.get(key)
+        if segments is None:
+            payload = json.loads(Path(key).read_text())
+            segments = sorted(payload["segments"], key=lambda s: int(s["start"]))
+            self._segment_text_cache[key] = segments
+        for segment in segments:
+            if int(segment["start"]) <= int(frame) < int(segment["end"]):
+                return segment
+        return None
+
+    def _load_text_context(
+        self, row: pd.Series, embedding_path: Optional[str] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if embedding_path is not None:
+            path = self.metadata_paths[int(row["_vpp2_source_idx"])].parent / str(embedding_path)
+        elif self.text_embedding_path_column is not None:
             path = self.metadata_paths[int(row["_vpp2_source_idx"])].parent / str(
                 row[self.text_embedding_path_column]
             )
@@ -1877,7 +1911,16 @@ class VideoEventDataset(torch.utils.data.Dataset):
             trajectory_idx, _, _ = self._resolve_step_index(sample_idx)
         row = self.metadata.iloc[trajectory_idx]
         instruction = self._get_instruction(row)
-        context, context_mask = self._load_text_context(row)
+        segment = None
+        if self.segment_text_column is not None and "absolute_step_idx" in sample:
+            segment = self._segment_text_for(row, int(sample["absolute_step_idx"]))
+        if segment is not None:
+            instruction = str(segment["prompt"])
+            context, context_mask = self._load_text_context(
+                row, embedding_path=str(segment["text_embedding_path"])
+            )
+        else:
+            context, context_mask = self._load_text_context(row)
         context[~context_mask] = 0.0
         context_mask = torch.ones_like(context_mask)
 
